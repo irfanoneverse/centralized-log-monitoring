@@ -1,0 +1,104 @@
+services:
+  loki:
+    image: grafana/loki:latest
+    container_name: poc-loki
+    restart: unless-stopped
+    environment:
+      - AWS_REGION=${AWS_REGION:-ap-southeast-1}
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./config/loki-config.yaml:/etc/loki/local-config.yaml
+      - loki-data:/loki
+    command:
+      - -config.file=/etc/loki/local-config.yaml
+      - -config.expand-env=true
+    networks:
+      - app-network
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    container_name: poc-tempo
+    restart: unless-stopped
+    environment:
+      - AWS_REGION=${AWS_REGION:-ap-southeast-1}
+    ports:
+      - "3200:3200"
+    volumes:
+      - ./config/tempo-config.yaml:/etc/tempo/tempo.yaml
+      - tempo-data:/var/tempo
+    command:
+      - -config.file=/etc/tempo/tempo.yaml
+      - -config.expand-env=true
+      - -target=all
+    networks:
+      - app-network
+
+  mimir:
+    image: grafana/mimir:latest
+    container_name: poc-mimir
+    restart: unless-stopped
+    environment:
+      - AWS_REGION=${AWS_REGION:-ap-southeast-1}
+    ports:
+      - "9009:9009"
+    volumes:
+      - ./config/mimir-config.yaml:/etc/mimir/mimir.yaml
+      - mimir-data:/data
+    command:
+      - -config.file=/etc/mimir/mimir.yaml
+      - -config.expand-env=true
+      - -target=all
+    networks:
+      - app-network
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: poc-otel-collector
+    restart: unless-stopped
+    environment:
+      - AWS_REGION=${AWS_REGION:-ap-southeast-1}
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "8889:8889"
+    volumes:
+      - ./config/otel-config.yaml:/etc/otel-col/config.yaml
+    command:
+      - --config=/etc/otel-col/config.yaml
+    depends_on:
+      - loki
+      - mimir
+      - tempo
+    networks:
+      - app-network
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: poc-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+    volumes:
+      - ./config/datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml
+    depends_on:
+      - loki
+      - mimir
+      - tempo
+      - otel-collector
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  loki-data:
+  tempo-data:
+  mimir-data:
+
+
