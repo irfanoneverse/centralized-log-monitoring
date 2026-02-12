@@ -1,101 +1,99 @@
-# LGTM Stack on AWS EC2 - Deployment Progress Handoff
+# AWS EC2 Deployment Progress - Continuation Runbook
 
 Last updated: 2026-02-12
 
-This note captures what is already done in this repository for AWS EC2 deployment, what is still pending, and how to continue quickly next time.
+This document is now focused on the only remaining objective: connect the **staging Laravel EC2** to the already-running **monitoring hub EC2**.
 
-## 0) Confirmed AWS progress (from current implementation)
+Reference: monitoring hub setup and health checks are documented in `README-AWS-MONITORING-HUB.md`.
 
-- Monitoring EC2 is launched and running:
+## 1) Current state (what is already done)
+
+### Monitoring hub EC2
+
+- Monitoring instance is launched and configured:
   - Instance ID: `i-01442ed1d6c38591d`
   - Name: `LGTM-Monitoring`
-  - Instance type: `t3.small`
+  - Type: `t3.small`
   - AZ: `ap-southeast-1b`
-- Security group in place (`LGTM-group`) with currently visible inbound rules:
+- Security group (`LGTM-group`) is in place with inbound rules already set:
   - `22/tcp` from `211.24.84.192/32`
   - `3000/tcp` from `211.24.84.192/32`
   - `3100/tcp` from `13.251.83.83/32`
   - `4317/tcp` from `13.251.83.83/32`
   - `4318/tcp` from `13.251.83.83/32`
   - `9009/tcp` from `13.251.83.83/32`
-- IAM role/policy has been prepared:
+- IAM role and policy prepared:
   - Role: `LGTM-Monitoring-Role`
   - Policy: `LGTM-Monitoring-Policy`
-  - S3 actions allowed: `s3:ListBucket`, `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject`
+  - S3 actions: `s3:ListBucket`, `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject`
   - Scope: `arn:aws:s3:::my-lgtm-*` and `arn:aws:s3:::my-lgtm-*/*`
 
-## 1) What has been completed
+### Repository and stack readiness
 
-- Architecture direction is finalized to `LGTM + OpenTelemetry`:
-  - `Loki` for logs
-  - `Tempo` for traces
-  - `Mimir` for metrics
-  - `Grafana` for visualization
-  - `OpenTelemetry Collector` for telemetry pipeline
-- A monitoring-only compose profile exists in `docker-compose.monitoring.yaml` for cloud-style deployment (Loki, Tempo, Mimir, Grafana).
-- AWS region support is wired into compose and config files using `AWS_REGION` (default `ap-southeast-1` in current files).
-- Storage backend for Loki/Tempo/Mimir is already set to AWS S3 in:
+- Architecture is finalized as `LGTM + OpenTelemetry`.
+- AWS-backed storage config is already wired:
   - `config/loki-config.yaml`
   - `config/tempo-config.yaml`
   - `config/mimir-config.yaml`
-- S3 bucket targets are already defined in config:
+- Bucket targets already defined:
   - `my-lgtm-loki`
   - `my-lgtm-tempo`
   - `my-lgtm-mimir`
   - `my-lgtm-mimir-ruler`
-- Known stability fix already applied:
-  - Tempo pinned to `grafana/tempo:2.6.1` to avoid `empty ring` issue.
-- Prior AWS deployment guide was previously created in commit `dc4555b` (`LGPO-Stack-AWS.md`), covering:
-  - EC2 monitoring hub setup
-  - IAM + SG recommendations
-  - OTel agent setup on app nodes
-  - Grafana + Prometheus operational flow
+- Tempo stability pin already applied: `grafana/tempo:2.6.1`.
 
-## 2) Current status snapshot
+## 2) Remaining objective
 
-- Monitoring EC2 infra base is already in place (instance + SG + IAM policy baseline).
-- Repo is ready for the **monitoring hub container deployment** on EC2.
-- Repo already reflects **S3-backed LGTM configs** (not local MinIO-only).
-- Existing markdown docs focus mostly on local/WSL workflow; this file now serves as explicit AWS EC2 continuation note.
-- Main remaining work: connect staging Laravel EC2 logs to the monitoring hub via OpenTelemetry Collector.
+Send logs from **staging Laravel EC2** to the monitoring hub OTLP endpoint:
 
-## 3) What is not yet in repo (pending)
+- gRPC: `http://<MONITORING_EC2_PRIVATE_IP_OR_DNS>:4317`
+- HTTP: `http://<MONITORING_EC2_PRIVATE_IP_OR_DNS>:4318`
 
-- No Infrastructure-as-Code yet (Terraform/CloudFormation not found).
-- No committed EC2 bootstrap automation (cloud-init/user-data scripts not found).
-- No committed systemd installer scripts for OTel agent on application EC2 nodes.
-- No dedicated `env` template for AWS deployment values (region/buckets/role assumptions).
-- No committed final record of actual AWS resource IDs from current deployment (instance IDs, SG IDs, bucket names per environment, DNS names).
+Recommended path: install **OpenTelemetry Collector agent** on staging EC2 from scratch and forward logs via OTLP gRPC (`4317`).
 
-## 4) Recommended resume plan (next session)
+Assumption for this runbook: staging EC2 has **no OTel setup yet**.
 
-1. Prepare/verify AWS resources:
-   - EC2 monitoring instance (Ubuntu 24.04+)
-   - IAM role with S3 access for Loki/Tempo/Mimir buckets
-   - Security groups for `22`, `3000`, `3100`, `4317`, `4318`, `9009`, `3200` (restricted to trusted CIDR/SG)
-2. On monitoring EC2:
-   - Install Docker + Docker Compose plugin
-   - Clone this repo
-   - Start stack with:
-     - `docker compose -f docker-compose.monitoring.yaml up -d`
-3. Validate services:
-   - Grafana `:3000`
-   - Loki `/ready` on `:3100`
-   - Mimir `/ready` on `:9009`
-   - Tempo `/ready` on `:3200`
-4. Configure telemetry ingestion from app nodes:
-   - Point OTel agents/SDKs to monitoring hub (`4317` or `4318`)
-   - Confirm logs/metrics/traces appear in Grafana
-5. Capture real deployed values back into this file:
-   - Public/private IP or DNS
-   - SG and IAM role names
-   - Final bucket names and lifecycle policy status
+## 3) Staging EC2 implementation steps from scratch (Laravel + LGTM smoke tests)
 
-## 5) Staging EC2 (Laravel) - next implementation checklist
+Your observed app path on staging is `/home/theone/kol`, so this runbook uses that path directly.
 
-Target: ship Laravel logs from staging EC2 to monitoring hub OTLP endpoint (`4317`/`4318`).
+### Step A - Collect values and define variables
 
-1. Install OTel collector on staging EC2:
+Run these on staging EC2 first:
+
+```bash
+hostname
+hostname -I
+```
+
+Set the monitoring hub endpoint once in shell:
+
+```bash
+export MONITORING_HOST="<MONITORING_EC2_PRIVATE_IP_OR_DNS>"
+echo "$MONITORING_HOST"
+```
+
+### Step B - Baseline package setup on staging EC2
+
+```bash
+sudo apt-get update
+sudo apt-get install -y curl wget tar ca-certificates netcat-openbsd jq
+```
+
+### Step C - Verify network connectivity to hub OTLP ports
+
+```bash
+nc -zv "$MONITORING_HOST" 4317
+nc -zv "$MONITORING_HOST" 4318
+```
+
+Both commands must show success before continuing.
+
+If failed:
+- add inbound allow rule on monitoring SG for staging EC2 source (IP or SG) on `4317` and `4318`
+- verify route tables and NACLs between subnets/VPC
+
+### Step D - Install OpenTelemetry Collector on staging EC2
 
 ```bash
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin otelcol || true
@@ -106,18 +104,52 @@ sudo mv otelcol-contrib /usr/local/bin/otelcol-contrib
 sudo chmod +x /usr/local/bin/otelcol-contrib
 sudo mkdir -p /etc/otelcol /var/lib/otelcol
 sudo chown -R otelcol:otelcol /etc/otelcol /var/lib/otelcol
+/usr/local/bin/otelcol-contrib --version
 ```
 
-2. Create collector config (`/etc/otelcol/config.yaml`) and point exporter to monitoring hub private endpoint:
+### Step E - Install telemetry generator for trace smoke test
 
-```yaml
+`telemetrygen` is used only to create a test trace to verify Tempo path end-to-end.
+
+```bash
+cd /tmp
+wget https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v0.112.0/telemetrygen_0.112.0_linux_amd64.tar.gz
+tar -xzf telemetrygen_0.112.0_linux_amd64.tar.gz
+sudo mv telemetrygen /usr/local/bin/telemetrygen
+sudo chmod +x /usr/local/bin/telemetrygen
+telemetrygen --help | head
+```
+
+### Step F - Create collector config on staging (`/etc/otelcol/config.yaml`)
+
+This config does all 3 signals:
+- logs: tail Laravel + nginx + syslog and send to Loki via hub collector
+- metrics: host metrics from staging and send to Mimir via hub collector
+- traces: accepts local OTLP traces (from `telemetrygen`) and sends to Tempo via hub collector
+
+```bash
+sudo tee /etc/otelcol/config.yaml > /dev/null <<EOF
 receivers:
   filelog:
     include:
-      - /var/www/**/storage/logs/*.log
+      - /home/theone/kol/storage/logs/*.log
       - /var/log/nginx/*.log
       - /var/log/syslog
     start_at: end
+  hostmetrics:
+    collection_interval: 30s
+    scrapers:
+      cpu: {}
+      memory: {}
+      filesystem: {}
+      load: {}
+      network: {}
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
 
 processors:
   memory_limiter:
@@ -129,9 +161,9 @@ processors:
   resource:
     attributes:
       - key: server_name
-        value: staging-laravel-ec2
+        value: $(hostname)
         action: upsert
-      - key: env
+      - key: deployment.environment
         value: staging
         action: upsert
       - key: service.name
@@ -140,7 +172,7 @@ processors:
 
 exporters:
   otlp:
-    endpoint: <MONITORING_EC2_PRIVATE_IP_OR_DNS>:4317
+    endpoint: ${MONITORING_HOST}:4317
     tls:
       insecure: true
 
@@ -150,9 +182,27 @@ service:
       receivers: [filelog]
       processors: [memory_limiter, resource, batch]
       exporters: [otlp]
+    metrics:
+      receivers: [hostmetrics]
+      processors: [memory_limiter, resource, batch]
+      exporters: [otlp]
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [otlp]
+EOF
 ```
 
-3. Create and start systemd service:
+### Step G - Ensure collector user can read log files
+
+```bash
+ls -lah /home/theone/kol/storage/logs /var/log/nginx || true
+sudo usermod -aG adm otelcol
+sudo usermod -aG www-data otelcol
+id otelcol
+```
+
+### Step H - Create and start systemd service
 
 ```bash
 sudo tee /etc/systemd/system/otelcol.service > /dev/null <<'EOF'
@@ -165,6 +215,7 @@ Wants=network-online.target
 Type=simple
 User=otelcol
 Group=otelcol
+Environment=MONITORING_HOST=<MONITORING_EC2_PRIVATE_IP_OR_DNS>
 ExecStart=/usr/local/bin/otelcol-contrib --config=/etc/otelcol/config.yaml
 Restart=always
 RestartSec=5
@@ -176,37 +227,117 @@ EOF
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now otelcol
+sudo systemctl restart otelcol
 sudo systemctl status otelcol --no-pager
 ```
 
-4. Validate end-to-end:
-   - On staging EC2, generate Laravel logs (hit app routes, trigger sample app log).
-   - On monitoring EC2, verify collector/hub receive traffic.
-   - In Grafana Explore (Loki), query:
-     - `{env="staging"}`
-     - `{service_name="laravel-staging"}`
-     - `{server_name="staging-laravel-ec2"}`
+### Step I - Verify collector is forwarding without errors
 
-## 6) Fill-in checklist for your real deployment
+On staging EC2:
 
-Use this section as your continuation tracker.
+```bash
+sudo journalctl -u otelcol -n 100 --no-pager
+sudo journalctl -u otelcol -f
+```
 
-- [x] Monitoring EC2 launched
-- [ ] IAM role attached to monitoring EC2 (re-verify attachment on instance profile)
-- [ ] S3 buckets created and accessible from EC2 role
-- [x] Security groups applied and verified
-- [ ] Stack started with `docker-compose.monitoring.yaml`
-- [ ] Grafana reachable from admin network
-- [ ] Loki/Mimir/Tempo healthy
-- [ ] Staging Laravel EC2 sending OTLP telemetry
-- [ ] Dashboards/Explore show real data
-- [ ] Lifecycle policy (Intelligent-Tiering + retention) confirmed
-- [ ] Production hardening (TLS/auth/restricted ingress) completed
+Look for absence of repeated errors such as:
+- `connection refused`
+- `context deadline exceeded`
+- `Permanent error`
 
-## 7) Notes for future cleanup
+### Step J - Test Loki ingestion (logs)
 
-- Consider restoring the old detailed AWS guide from commit `dc4555b` as `docs/aws/LGPO-Stack-AWS.md` for full runbook reference.
-- Add IaC and bootstrap scripts so EC2 setup is reproducible.
-- Add an `aws.env.example` file to avoid manual variable drift between environments.
+1. Generate explicit test log line from staging:
+
+```bash
+echo "[otel-smoke] $(date -Iseconds) staging log pipeline test" | sudo tee -a /home/theone/kol/storage/logs/laravel.log
+```
+
+2. On monitoring hub EC2, verify Loki is healthy:
+
+```bash
+curl -sf http://localhost:3100/ready && echo "loki ok"
+```
+
+3. In Grafana Explore, datasource = Loki, query:
+
+```text
+{service_name="laravel-staging"} |= "otel-smoke"
+```
+
+### Step K - Test Mimir ingestion (metrics)
+
+1. Wait 1-2 minutes (hostmetrics collection interval is 30s).
+2. On monitoring hub EC2, verify Mimir is healthy:
+
+```bash
+curl -sf http://localhost:9009/ready && echo "mimir ok"
+```
+
+3. In Grafana Explore, datasource = Mimir (Prometheus), try:
+
+```promql
+count({__name__=~".+"})
+```
+
+Then filter for staging labels:
+
+```promql
+count by (service_name, deployment_environment) ({service_name="laravel-staging"})
+```
+
+If metric names differ by version/translation, use Grafana metric browser and search for `system` metrics from hostmetrics.
+
+### Step L - Test Tempo ingestion (traces)
+
+1. Generate traces from staging via local collector receiver:
+
+```bash
+telemetrygen traces --otlp-insecure --otlp-endpoint 127.0.0.1:4317 --traces 20
+```
+
+2. On monitoring hub EC2, verify Tempo is healthy:
+
+```bash
+curl -sf http://localhost:3200/ready && echo "tempo ok"
+```
+
+3. In Grafana Explore, datasource = Tempo:
+- set service filter to `laravel-staging` (or search all services if not shown immediately)
+- look for traces in the last 15 minutes
+
+## 4) Definition of done for this phase
+
+Mark this phase complete when all are true:
+
+- [ ] Staging EC2 can connect to monitoring hub on `4317` and `4318`
+- [ ] `otelcol` service is active and enabled at boot
+- [ ] Loki test log (`otel-smoke`) is visible in Grafana Explore
+- [ ] Host metrics from staging are visible in Mimir datasource
+- [ ] Trace smoke test from `telemetrygen` is visible in Tempo datasource
+- [ ] No recurring exporter/network errors in `journalctl -u otelcol`
+
+## 5) Quick troubleshooting notes
+
+- `failed to start service`: check YAML syntax in `/etc/otelcol/config.yaml`.
+- `permission denied` on Laravel logs:
+  - confirm file exists: `/home/theone/kol/storage/logs/laravel.log`
+  - ensure `otelcol` is in needed groups (`adm`, `www-data`)
+  - restart service after group changes: `sudo systemctl restart otelcol`
+- no Loki logs:
+  - appending test line must be to exact monitored file path
+  - keep `start_at: end` in mind (collector reads new lines after startup)
+- no Mimir metrics:
+  - wait at least 60-120s for first batches
+  - check staging journal for exporter retries
+- no Tempo traces:
+  - rerun `telemetrygen traces ...`
+  - confirm `traces` pipeline exists and local OTLP receiver is listening on `127.0.0.1:4317`
+
+## 6) Follow-up improvements (after staging is stable)
+
+- Add bootstrap script for staging/prod OTel agent install and systemd setup.
+- Add `aws.env.example` with `MONITORING_HOST`, region, and standard labels.
+- Add IaC for EC2, SG, IAM, and S3 resources for repeatable deployment.
 
 

@@ -1,6 +1,6 @@
 # AWS Monitoring Hub Quick Start
 
-This repository is prepared for AWS monitoring hub deployment (no local demo services).
+This repository is prepared for AWS monitoring hub deployment.
 
 ## 1) Prerequisites on EC2
 
