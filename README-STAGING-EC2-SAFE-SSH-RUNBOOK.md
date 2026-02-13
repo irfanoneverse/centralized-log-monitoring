@@ -1,68 +1,76 @@
-# Staging EC2 Safe Runbook (SSH-Only, No Console Access)
+# Staging EC2 OpenTelemetry Agent Runbook (Untouched Server Start)
 
 Last updated: 2026-02-13
 
-This guide is for safely enabling OpenTelemetry on the official staging server when you do not have AWS Console access.
+This runbook is the next phase after monitoring hub is up. It assumes:
 
-- Monitoring hub SSH: `ssh -i ~/.ssh/LGTM-key.pem ubuntu@18.140.5.245`
-- Staging SSH: `ssh -i ~/.ssh/duadualive-staging.pem ubuntu@13.251.83.83`
+- Monitoring hub EC2 is healthy and reachable.
+- Staging EC2 has no OpenTelemetry setup yet.
+- You will perform rollout using SSH only, with safe rollback points.
 
-Primary goal: make changes with rollback points, using only SSH + CLI.
+Quick SSH references:
 
-## 1) Can AMI be created from SSH?
+- Monitoring hub: `ssh -i ~/.ssh/LGTM-key.pem ubuntu@18.140.5.245`
+- Staging app server: `ssh -i ~/.ssh/duadualive-staging.pem ubuntu@13.251.83.83`
 
-Yes, if you can run AWS CLI with IAM permissions (`ec2:CreateImage`, `ec2:CreateSnapshot`, and describe permissions).
+## 1) Current status and objective
 
-Important:
-- You do not need Console for this.
-- You can run AWS CLI from any machine that has AWS credentials (local laptop, bastion, or server with role creds).
-- If permissions are denied, use the fallback rollback method in Section 3 and ask your cloud admin for AMI/snapshot creation.
+Current status:
 
-## 2) Preflight: run from your local machine (recommended)
+- Monitoring hub (Grafana/Loki/Tempo/Mimir/OTel collector) is running.
+- Staging Laravel EC2 is still untouched.
 
-Check AWS CLI and identity:
+Objective:
+
+- Install OpenTelemetry Collector **agent** on staging EC2.
+- Collect staging logs/metrics/traces locally and forward to monitoring hub OTLP (`4317`).
+- Verify data in Grafana Explore.
+
+Definition of done:
+
+- `otelcol` service is active and enabled on staging.
+- Staging can reach monitoring hub on `4317` and `4318`.
+- Log smoke test appears in Loki.
+- Host metrics appear in Mimir.
+- Trace smoke test appears in Tempo.
+
+## 2) Phase 0 - Zero-touch preparation (before touching staging)
+
+Do this from local machine first.
+
+### 2.1 Validate monitoring hub health
 
 ```bash
-aws --version
-aws sts get-caller-identity
+ssh -i ~/.ssh/LGTM-key.pem ubuntu@18.140.5.245
+curl -sf http://localhost:3100/ready && echo "loki ok"
+curl -sf http://localhost:3200/ready && echo "tempo ok"
+curl -sf http://localhost:9009/ready && echo "mimir ok"
+curl -sf http://localhost:3000/api/health && echo "grafana ok"
+exit
 ```
 
-If this fails, configure credentials/profile first:
+### 2.2 Confirm network path from staging to hub
 
-```bash
-aws configure
-# or use: aws sso login --profile <profile-name>
-```
+At minimum, monitoring EC2 security group must allow staging source IP/SG on:
 
-Set variables (update region if needed):
+- `4317/tcp` (OTLP gRPC)
+- `4318/tcp` (OTLP HTTP, optional but recommended)
+
+### 2.3 Create rollback point (recommended)
+
+If AWS CLI + IAM permissions exist, create AMI/snapshots before installing anything.
 
 ```bash
 export AWS_REGION=ap-southeast-1
 export STAGING_PUBLIC_IP=13.251.83.83
 export TS=$(date +%Y%m%d-%H%M%S)
-```
 
-Find staging instance ID by public IP:
-
-```bash
 export STAGING_INSTANCE_ID=$(aws ec2 describe-instances \
   --region "$AWS_REGION" \
   --filters "Name=ip-address,Values=$STAGING_PUBLIC_IP" "Name=instance-state-name,Values=running" \
   --query "Reservations[].Instances[].InstanceId" \
   --output text)
 
-echo "$STAGING_INSTANCE_ID"
-```
-
-If instance ID is empty, ask admin for the exact staging instance ID.
-
-## 3) Create rollback points before any change
-
-### A. Preferred rollback (AMI + snapshots via AWS CLI)
-
-Create AMI:
-
-```bash
 export AMI_NAME="staging-pre-otel-$TS"
 aws ec2 create-image \
   --region "$AWS_REGION" \
@@ -72,65 +80,17 @@ aws ec2 create-image \
   --no-reboot
 ```
 
-Optional: wait for image completion:
+If AMI/snapshot permissions are unavailable, continue with filesystem backups in Phase 1.
 
-```bash
-export AMI_ID=$(aws ec2 describe-images \
-  --region "$AWS_REGION" \
-  --owners self \
-  --filters "Name=name,Values=$AMI_NAME" \
-  --query "Images[0].ImageId" \
-  --output text)
+## 3) Phase 1 - First touch and baseline capture (staging EC2)
 
-echo "$AMI_ID"
-aws ec2 wait image-available --region "$AWS_REGION" --image-ids "$AMI_ID"
-```
-
-Create snapshots for all attached EBS volumes:
-
-```bash
-VOLUME_IDS=$(aws ec2 describe-instances \
-  --region "$AWS_REGION" \
-  --instance-ids "$STAGING_INSTANCE_ID" \
-  --query "Reservations[].Instances[].BlockDeviceMappings[].Ebs.VolumeId" \
-  --output text)
-
-for v in $VOLUME_IDS; do
-  aws ec2 create-snapshot \
-    --region "$AWS_REGION" \
-    --volume-id "$v" \
-    --description "staging-pre-otel-$TS volume $v"
-done
-```
-
-### B. Fallback rollback if AMI/snapshot permission is denied
-
-You still can reduce risk significantly:
-
-1. Make local backups on staging for every file/service you touch.
-2. Keep a command transcript (`script`) to undo exactly what changed.
-3. Apply changes in tiny steps and validate each step.
-4. Stop immediately on repeated errors.
-
-## 4) SSH sessions setup
-
-Open 2 terminals.
-
-Terminal A (monitoring):
-
-```bash
-ssh -i ~/.ssh/LGTM-key.pem ubuntu@18.140.5.245
-```
-
-Terminal B (staging):
+Connect:
 
 ```bash
 ssh -i ~/.ssh/duadualive-staging.pem ubuntu@13.251.83.83
 ```
 
-## 5) Staging safety baseline (Terminal B)
-
-Create a transcript and backup folder:
+Create transcript + backup directory:
 
 ```bash
 TS=$(date +%Y%m%d-%H%M%S)
@@ -148,7 +108,7 @@ id
 systemctl status otelcol --no-pager || true
 ```
 
-Backup pre-existing files:
+Backup any existing OTel artifacts (safe no-op if none):
 
 ```bash
 sudo test -f /etc/systemd/system/otelcol.service && sudo cp -a /etc/systemd/system/otelcol.service /root/pre-otel-$TS/
@@ -156,32 +116,30 @@ sudo test -d /etc/otelcol && sudo cp -a /etc/otelcol /root/pre-otel-$TS/
 id otelcol || true
 ```
 
-## 6) Connectivity + package baseline (Terminal B)
+## 4) Phase 2 - Install OpenTelemetry Collector agent
 
-Set monitoring host:
+Set monitoring target:
 
 ```bash
 export MONITORING_HOST=18.140.5.245
 echo "$MONITORING_HOST"
 ```
 
-Install utilities:
+Install base utilities:
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y curl wget tar ca-certificates netcat-openbsd jq
 ```
 
-Verify OTLP ports:
+Validate connectivity to monitoring OTLP:
 
 ```bash
 nc -zv "$MONITORING_HOST" 4317
 nc -zv "$MONITORING_HOST" 4318
 ```
 
-Do not continue until both are reachable.
-
-## 7) Install OTel binaries (Terminal B)
+Install collector and telemetrygen:
 
 ```bash
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin otelcol || true
@@ -200,16 +158,12 @@ sudo chmod +x /usr/local/bin/telemetrygen
 telemetrygen --help | head
 ```
 
-## 8) Create collector config (Terminal B)
+Create collector config:
 
 ```bash
 sudo mkdir -p /etc/otelcol /var/lib/otelcol
 sudo chown -R otelcol:otelcol /etc/otelcol /var/lib/otelcol
-```
 
-Write config:
-
-```bash
 sudo tee /etc/otelcol/config.yaml > /dev/null <<EOF
 receivers:
   filelog:
@@ -272,7 +226,7 @@ service:
 EOF
 ```
 
-Permissions for log reading:
+Grant log-read access:
 
 ```bash
 sudo usermod -aG adm otelcol
@@ -281,7 +235,7 @@ id otelcol
 ls -lah /home/theone/kol/storage/logs /var/log/nginx || true
 ```
 
-## 9) Create and start systemd service (Terminal B)
+Create and start systemd service:
 
 ```bash
 sudo tee /etc/systemd/system/otelcol.service > /dev/null <<EOF
@@ -303,59 +257,50 @@ LimitNOFILE=65536
 [Install]
 WantedBy=multi-user.target
 EOF
-```
 
-Start and inspect:
-
-```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now otelcol
 sudo systemctl status otelcol --no-pager
 sudo journalctl -u otelcol -n 80 --no-pager
 ```
 
-If you see repeated `connection refused`, `context deadline exceeded`, or permanent exporter errors, stop and troubleshoot before moving on.
+## 5) Phase 3 - Validate ingestion end-to-end
 
-## 10) Health checks and smoke tests
-
-### Monitoring hub checks (Terminal A)
-
-```bash
-curl -sf http://localhost:3100/ready && echo "loki ok"
-curl -sf http://localhost:9009/ready && echo "mimir ok"
-curl -sf http://localhost:3200/ready && echo "tempo ok"
-```
-
-### Staging test data (Terminal B)
+Generate smoke test data on staging:
 
 ```bash
 echo "[otel-smoke] $(date -Iseconds) staging log pipeline test" | sudo tee -a /home/theone/kol/storage/logs/laravel.log
 telemetrygen traces --otlp-insecure --otlp-endpoint 127.0.0.1:4317 --traces 20
 ```
 
-Grafana Explore checks:
+Check monitoring hub health:
+
+```bash
+ssh -i ~/.ssh/LGTM-key.pem ubuntu@18.140.5.245
+curl -sf http://localhost:3100/ready && echo "loki ok"
+curl -sf http://localhost:9009/ready && echo "mimir ok"
+curl -sf http://localhost:3200/ready && echo "tempo ok"
+exit
+```
+
+Grafana checks:
+
+- URL: `http://18.140.5.245:3000`
 - Loki query: `{service_name="laravel-staging"} |= "otel-smoke"`
-- Mimir: wait 1-2 minutes, then inspect host metrics
-- Tempo: traces in last 15 minutes, service `laravel-staging`
+- Mimir: wait 1-2 minutes and explore host metrics for `service_name="laravel-staging"`
+- Tempo: traces from service `laravel-staging` in last 15 minutes
 
-## 11) Immediate rollback commands (Terminal B)
-
-Stop and remove OTel service/config:
+## 6) Fast rollback (if anything goes wrong)
 
 ```bash
 sudo systemctl disable --now otelcol || true
 sudo rm -f /etc/systemd/system/otelcol.service
 sudo rm -rf /etc/otelcol
 sudo systemctl daemon-reload
-```
-
-Optional user cleanup:
-
-```bash
 sudo userdel otelcol || true
 ```
 
-Restore from local backups (if present):
+Restore backups if needed:
 
 ```bash
 sudo cp -a /root/pre-otel-<TIMESTAMP>/otelcol /etc/ || true
@@ -363,15 +308,10 @@ sudo cp -a /root/pre-otel-<TIMESTAMP>/otelcol.service /etc/systemd/system/ || tr
 sudo systemctl daemon-reload
 ```
 
-If AMI/snapshot was created, full rollback is done by launching/recovering from that backup via your cloud admin flow.
+## 7) Operator notes
 
-## 12) Suggested Git practice (repo only)
-
-Use a branch for runbook/scripts changes:
-
-```bash
-git checkout -b chore/staging-otel-safe-rollout
-```
-
-Remember: Git reverts repository files, not server OS/package/systemd state.
+- Keep rollout incremental. Stop if repeated exporter errors appear in `journalctl -u otelcol`.
+- `start_at: end` means only new log lines after collector starts are shipped.
+- If staging and monitoring are in the same VPC, prefer private IP for `MONITORING_HOST`.
+- After staging is stable, turn this into a reusable install script for production rollout.
 

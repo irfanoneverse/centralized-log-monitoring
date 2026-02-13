@@ -1,10 +1,12 @@
 # AWS EC2 Deployment Progress - Continuation Runbook
 
-Last updated: 2026-02-12
+Last updated: 2026-02-13
 
 This document is now focused on the only remaining objective: connect the **staging Laravel EC2** to the already-running **monitoring hub EC2**.
 
-Reference: monitoring hub setup and health checks are documented in `README-AWS-MONITORING-HUB.md`.
+Reference:
+- Monitoring hub setup and health checks: `README-AWS-MONITORING-HUB.md`
+- Staging rollout (untouched EC2 start): `README-STAGING-EC2-SAFE-SSH-RUNBOOK.md`
 
 ## 1) Current state (what is already done)
 
@@ -53,7 +55,19 @@ Recommended path: install **OpenTelemetry Collector agent** on staging EC2 from 
 
 Assumption for this runbook: staging EC2 has **no OTel setup yet**.
 
-## 3) Staging EC2 implementation steps from scratch (Laravel + LGTM smoke tests)
+## 3) Staging EC2 implementation (handoff summary)
+
+Detailed step-by-step commands are now maintained in `README-STAGING-EC2-SAFE-SSH-RUNBOOK.md`.
+
+Execution order:
+
+1. Phase 0: zero-touch prep (hub health, SG/network checks, optional AMI/snapshot).
+2. Phase 1: first touch on staging (transcript, baseline capture, backups).
+3. Phase 2: install and configure OpenTelemetry Collector agent.
+4. Phase 3: validate logs/metrics/traces in Grafana.
+5. Roll back immediately if exporter/network/permission errors repeat.
+
+## 4) Legacy command reference (kept for context)
 
 Your observed app path on staging is `/home/theone/kol`, so this runbook uses that path directly.
 
@@ -306,7 +320,7 @@ curl -sf http://localhost:3200/ready && echo "tempo ok"
 - set service filter to `laravel-staging` (or search all services if not shown immediately)
 - look for traces in the last 15 minutes
 
-## 4) Definition of done for this phase
+## 5) Definition of done for this phase
 
 Mark this phase complete when all are true:
 
@@ -317,7 +331,7 @@ Mark this phase complete when all are true:
 - [ ] Trace smoke test from `telemetrygen` is visible in Tempo datasource
 - [ ] No recurring exporter/network errors in `journalctl -u otelcol`
 
-## 5) Quick troubleshooting notes
+## 6) Quick troubleshooting notes
 
 - `failed to start service`: check YAML syntax in `/etc/otelcol/config.yaml`.
 - `permission denied` on Laravel logs:
@@ -334,7 +348,7 @@ Mark this phase complete when all are true:
   - rerun `telemetrygen traces ...`
   - confirm `traces` pipeline exists and local OTLP receiver is listening on `127.0.0.1:4317`
 
-## 6) Follow-up improvements (after staging is stable)
+## 7) Follow-up improvements (after staging is stable)
 
 - Add bootstrap script for staging/prod OTel agent install and systemd setup.
 - Add `aws.env.example` with `MONITORING_HOST`, region, and standard labels.
