@@ -9,6 +9,7 @@ common:
     backend: s3
     s3:
       # AWS S3 note: Enable Intelligent-Tiering and a 365-day expiration lifecycle rule in AWS Console.
+      endpoint: s3.${AWS_REGION}.amazonaws.com
       region: ${AWS_REGION}
       bucket_name: my-lgtm-mimir
 
@@ -16,6 +17,7 @@ blocks_storage:
   backend: s3
   s3:
     # AWS S3 note: Enable Intelligent-Tiering and a 365-day expiration lifecycle rule in AWS Console.
+    endpoint: s3.${AWS_REGION}.amazonaws.com
     region: ${AWS_REGION}
     bucket_name: my-lgtm-mimir
   tsdb:
@@ -44,6 +46,7 @@ ruler_storage:
   backend: s3
   s3:
     # AWS S3 note: Enable Intelligent-Tiering and a 365-day expiration lifecycle rule in AWS Console.
+    endpoint: s3.${AWS_REGION}.amazonaws.com
     region: ${AWS_REGION}
     bucket_name: my-lgtm-mimir-ruler
 

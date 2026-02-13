@@ -28,6 +28,7 @@ storage:
     s3:
       # AWS S3 note: Enable Intelligent-Tiering and a 365-day expiration lifecycle rule in AWS Console.
       bucket: my-lgtm-tempo
+      endpoint: s3.${AWS_REGION}.amazonaws.com
       region: ${AWS_REGION}
       forcepathstyle: false
 
